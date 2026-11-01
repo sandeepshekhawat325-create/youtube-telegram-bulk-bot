@@ -53,6 +53,7 @@ HEALTH = {"last_check": None, "last_delivery": None, "last_error": None,
           "fresh_entries": 0, "link_failures": 0,
           "official_candidates": 0, "duplicate_items": 0,
           "delivery_success": 0, "delivery_failed": 0,
+          "delivery_error": "अभी कोई त्रुटि नहीं",
           "no_official_streak": 0,
           "diagnostic_alert_active": False,
           "last_scan_summary": "अभी कोई जाँच नहीं हुई"}
@@ -234,6 +235,7 @@ async def scan_once(bot: Bot):
     HEALTH["duplicate_items"] = 0
     HEALTH["delivery_success"] = 0
     HEALTH["delivery_failed"] = 0
+    HEALTH["delivery_error"] = "अभी कोई त्रुटि नहीं"
     HEALTH["fresh_entries"] = 0
     HEALTH["link_failures"] = 0
     total_entries = 0
@@ -318,18 +320,29 @@ async def scan_once(bot: Bot):
                 )
                 delivered = False
                 for chat_id in CHAT_IDS:
-                    try:
-                        await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML",
-                                               disable_web_page_preview=True)
-                        delivered = True
-                        HEALTH["delivery_success"] += 1
-                        docs_sent = await send_official_documents(bot, chat_id, final_url, title)
-                        log.info("Official attachments sent=%d for: %s", docs_sent, title[:160])
-                        HEALTH["last_delivery"] = datetime.now().astimezone().strftime("%d-%m-%Y %I:%M:%S %p %Z")
-                        HEALTH["items_sent"] += 1
-                    except Exception:
+                    send_error = None
+                    for attempt in range(1, 3):
+                        try:
+                            await bot.send_message(
+                                chat_id=chat_id, text=text, parse_mode="HTML",
+                                disable_web_page_preview=True
+                            )
+                            delivered = True
+                            HEALTH["delivery_success"] += 1
+                            HEALTH["delivery_error"] = "अभी कोई त्रुटि नहीं"
+                            docs_sent = await send_official_documents(bot, chat_id, final_url, title)
+                            log.info("Official attachments sent=%d for: %s", docs_sent, title[:160])
+                            HEALTH["last_delivery"] = datetime.now(INDIA_TZ).strftime("%d-%m-%Y %I:%M:%S %p IST")
+                            HEALTH["items_sent"] += 1
+                            break
+                        except Exception as exc:
+                            send_error = f"{type(exc).__name__}: {str(exc)}"[:350]
+                            log.exception("Telegram delivery attempt %d/2 failed for %s", attempt, chat_id)
+                            if attempt < 2:
+                                await asyncio.sleep(3)
+                    if not delivered and send_error:
                         HEALTH["delivery_failed"] += 1
-                        log.exception("Telegram delivery failed for destination %s", chat_id)
+                        HEALTH["delivery_error"] = send_error
                 if delivered:
                     mark_sent(item_id)
                     sent_this_cycle += 1
@@ -424,6 +437,7 @@ async def status_command(update, context):
         f"♻️ Duplicate खबरें: {HEALTH['duplicate_items']}\\n"
         f"📤 Telegram Delivery: {HEALTH['delivery_success']} सफल | "
         f"{HEALTH['delivery_failed']} असफल\\n"
+        f"🛠 Delivery Error: {HEALTH['delivery_error']}\\n"
         f"📈 इस रनटाइम में भेजी गई खबरें: {HEALTH['items_sent']}\\n"
         "━━━━━━━━━━━━━━━━━━━━\\n"
         "📢 CHANNEL DETAILS\\n"
