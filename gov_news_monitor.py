@@ -138,8 +138,22 @@ async def scan_once(bot: Bot):
             for entry in entries:
                 title = (entry.get("title") or "शीर्षक उपलब्ध नहीं").strip()
                 final_url = await asyncio.to_thread(resolve_entry_url, entry)
+
+                # Google News RSS sometimes keeps its own redirect URL even after
+                # a successful request. Fall back to the publisher URL advertised
+                # in the RSS source metadata, but only if that host is official.
                 if not official_url(final_url):
-                    log.debug("Skipping non-official/unresolved item: %s", final_url[:300])
+                    source_meta = entry.get("source") or {}
+                    source_url = (source_meta.get("href") or "").strip()
+                    if official_url(source_url):
+                        log.info("Using verified official publisher URL from RSS metadata: %s",
+                                 urlparse(source_url).hostname)
+                        final_url = source_url
+
+                if not official_url(final_url):
+                    log.info("Skipping item: no official URL found | title=%s | resolved=%s | source=%s",
+                             title[:180], final_url[:220],
+                             (entry.get("source") or {}).get("href", "")[:220])
                     continue
                 HEALTH["official_candidates"] += 1
                 item_id = stable_id(entry, final_url)
