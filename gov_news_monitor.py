@@ -10,7 +10,7 @@ import os
 import sqlite3
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 
@@ -27,6 +27,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHAT_IDS = [x.strip() for x in os.getenv("TELEGRAM_CHAT_IDS", "").split(",") if x.strip()]
 POLL_SECONDS = max(120, int(os.getenv("POLL_SECONDS", "120")))
 DB_PATH = os.getenv("NEWS_DB_PATH", "gov_news.sqlite3")
+MAX_NEWS_AGE_HOURS = max(1, int(os.getenv("MAX_NEWS_AGE_HOURS", "24")) )
 
 # Add or replace feeds in Render's FEED_URLS environment variable (comma-separated).
 # These Google News RSS queries are discovery feeds; a story is sent only after
@@ -94,15 +95,53 @@ def resolve_entry_url(entry) -> str:
             if attempt == 2:
                 return url
 
-def publication_time(entry) -> str:
+def entry_datetime(entry):
+    parsed = entry.get("published_parsed") or entry.get("updated_parsed")
+    if parsed:
+        try:
+            return datetime(*parsed[:6], tzinfo=timezone.utc)
+        except Exception:
+            pass
     raw = entry.get("published") or entry.get("updated")
     if raw:
         try:
             dt = parsedate_to_datetime(raw)
-            return dt.astimezone().strftime("%d-%m-%Y %I:%M %p %Z")
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
         except Exception:
-            pass
-    return "प्रकाशन समय उपलब्ध नहीं"
+            return None
+    return None
+
+def publication_time(entry) -> str:
+    dt = entry_datetime(entry)
+    return dt.astimezone().strftime("%d-%m-%Y %I:%M %p %Z") if dt else "प्रकाशन समय उपलब्ध नहीं"
+
+def detailed_summary(entry) -> str:
+    chunks = []
+    for key in ("content", "summary_detail", "summary", "description"):
+        value = entry.get(key)
+        if isinstance(value, list):
+            chunks.extend(part.get("value", "") for part in value if isinstance(part, dict))
+        elif isinstance(value, dict):
+            chunks.append(value.get("value", ""))
+        elif isinstance(value, str):
+            chunks.append(value)
+    from html.parser import HTMLParser
+    class StripHTML(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.parts = []
+        def handle_data(self, data):
+            self.parts.append(data)
+    cleaned = []
+    for chunk in chunks:
+        parser = StripHTML()
+        parser.feed(chunk)
+        value = " ".join(" ".join(parser.parts).split())
+        if value and value not in cleaned:
+            cleaned.append(value)
+    return " ".join(cleaned)[:2400]
 
 def stable_id(entry, final_url: str) -> str:
     return str(entry.get("id") or entry.get("guid") or final_url)
@@ -155,31 +194,36 @@ async def scan_once(bot: Bot):
                              title[:180], final_url[:220],
                              (entry.get("source") or {}).get("href", "")[:220])
                     continue
+                published_dt = entry_datetime(entry)
+                if published_dt is None:
+                    log.info("Skipping item with no verifiable publication date: %s", title[:180])
+                    continue
+                age = datetime.now(timezone.utc) - published_dt
+                if age < timedelta(minutes=-10) or age > timedelta(hours=MAX_NEWS_AGE_HOURS):
+                    log.info("Skipping stale/future item (%s): %s", publication_time(entry), title[:180])
+                    continue
+
                 HEALTH["official_candidates"] += 1
                 item_id = stable_id(entry, final_url)
                 if not item_id or was_sent(item_id):
                     continue
-                summary = (entry.get("summary") or entry.get("description") or "").strip()
-                # Remove markup and keep Telegram message within safe limits.
-                from html.parser import HTMLParser
-                class StripHTML(HTMLParser):
-                    def __init__(self):
-                        super().__init__()
-                        self.parts = []
-                    def handle_data(self, data):
-                        self.parts.append(data)
-                stripper = StripHTML()
-                stripper.feed(summary)
-                summary = " ".join(" ".join(stripper.parts).split())[:900]
+                summary = detailed_summary(entry)
                 text = (
-                    "🆕 <b>नई सरकारी सूचना</b>\n"
-                    f"<b>{html.escape(title[:350])}</b>\n\n"
-                    f"🏛 स्रोत: <code>{html.escape(urlparse(final_url).hostname or '')}</code>\n"
-                    f"🕒 समय: {html.escape(publication_time(entry))}\n"
+                    "🆕 <b>नई सरकारी सूचना</b>\\n"
+                    f"<b>{html.escape(title[:350])}</b>\\n\\n"
+                    f"🏛 <b>विभाग/स्रोत:</b> <code>{html.escape(urlparse(final_url).hostname or '')}</code>\\n"
+                    f"🕒 <b>प्रकाशन:</b> {html.escape(publication_time(entry))}\\n"
+                    f"📌 <b>विस्तृत जानकारी:</b>\\n"
                 )
                 if summary:
-                    text += f"\n{html.escape(summary)}\n"
-                text += f"\n🔗 <a href=\"{html.escape(final_url, quote=True)}\">आधिकारिक सूचना देखें</a>"
+                    text += f"{html.escape(summary)}\\n"
+                else:
+                    text += "आधिकारिक RSS में विस्तृत विवरण उपलब्ध नहीं है। कृपया मूल अधिसूचना खोलें।\\n"
+                text += (
+                    "\\n🎯 <b>महत्त्व:</b> पात्रता, निर्देश, तिथि और लाभ/प्रभाव की पुष्टि "
+                    "मूल आधिकारिक दस्तावेज़ से करें।\\n"
+                    f"🔗 <a href=\\\"{html.escape(final_url, quote=True)}\\\">आधिकारिक सूचना / दस्तावेज़ देखें</a>"
+                )
                 delivered = False
                 for chat_id in CHAT_IDS:
                     try:
