@@ -181,8 +181,10 @@ def parse_feed(url: str):
     return feedparser.parse(response.content)
 
 
-def find_official_documents(page_url: str):
-    """Find up to three PDF/Word attachments linked from an official page."""
+def find_official_documents(page_url: str, title: str = ""):
+    """Find only relevant PDF/Word attachments from an official government page."""
+    if not official_url(page_url):
+        return []
     import requests
     from html.parser import HTMLParser
     class LinkParser(HTMLParser):
@@ -202,16 +204,31 @@ def find_official_documents(page_url: str):
         if res.ok and "text/html" in res.headers.get("Content-Type", "").lower():
             parser = LinkParser()
             parser.feed(res.text[:2000000])
+            title_terms = {w.lower() for w in re.findall(r"[a-zA-Z]{3,}|[0-9]{4,}", title)
+                           if w.lower() not in {"the", "and", "for", "with", "from", "under",
+                                               "department", "government", "official", "notice",
+                                               "notification", "document", "download"}}
+            ranked = []
             for link in parser.links:
-                if official_url(link) and urlparse(link).path.lower().endswith((".pdf", ".doc", ".docx")):
-                    found.append(link)
+                path = urlparse(link).path.lower()
+                if not official_url(link) or not path.endswith((".pdf", ".doc", ".docx")):
+                    continue
+                filename = path.rsplit("/", 1)[-1]
+                file_terms = {w.lower() for w in re.findall(r"[a-zA-Z]{3,}|[0-9]{4,}", filename)}
+                overlap = len(title_terms & file_terms)
+                if overlap:
+                    ranked.append((overlap, link))
+            ranked.sort(key=lambda x: x[0], reverse=True)
+            found.extend(link for _, link in ranked)
     except Exception:
         log.exception("Official page document discovery failed: %s", page_url)
     return list(dict.fromkeys(found))[:3]
 
 async def send_official_documents(bot: Bot, chat_id: str, page_url: str, title: str):
     import requests
-    links = await asyncio.to_thread(find_official_documents, page_url)
+    if not official_url(page_url):
+        return 0
+    links = await asyncio.to_thread(find_official_documents, page_url, title)
     sent = 0
     for link in links:
         try:
@@ -318,23 +335,26 @@ async def scan_once(bot: Bot):
                     log.info("Skipping duplicate item: %s", title[:180])
                     continue
                 summary = detailed_summary(entry)
+                source_host = urlparse(final_url).hostname or "अज्ञात स्रोत"
+                source_label = "आधिकारिक सरकारी सूचना" if official_url(final_url) else "मीडिया रिपोर्ट"
                 text = (
-                    "🆕 <b>नई सरकारी/राजस्थान समाचार सूचना</b>\\n"
-                    f"📰 <b>श्रेणी:</b> {source_label}\\n"
-                    f"<b>{html.escape(title[:350])}</b>\\n\\n"
-                    f"🏛 <b>विभाग/स्रोत:</b> <code>{html.escape(urlparse(final_url).hostname or '')}</code>\\n"
-                    f"🕒 <b>प्रकाशन:</b> {html.escape(publication_time(entry))}\\n"
-                    f"📌 <b>विस्तृत जानकारी:</b>\\n"
+                    f"📰 <b>{source_label}</b>\n"
+                    f"<b>{html.escape(title[:350])}</b>\n\n"
+                    f"🏢 <b>स्रोत:</b> {html.escape(source_host)}\n"
+                    f"🕒 <b>प्रकाशन:</b> {html.escape(publication_time(entry))}\n\n"
+                    "<b>📝 खबर का विवरण</b>\n"
                 )
                 if summary:
-                    text += f"{html.escape(summary)}\\n"
+                    text += f"{html.escape(summary[:2200])}\n\n"
                 else:
-                    text += "आधिकारिक RSS में विस्तृत विवरण उपलब्ध नहीं है। कृपया मूल अधिसूचना खोलें।\\n"
-                text += (
-                    "\\n🎯 <b>महत्त्व:</b> पात्रता, निर्देश, तिथि और लाभ/प्रभाव की पुष्टि "
-                    "मूल आधिकारिक दस्तावेज़ से करें।\\n"
-                    f"🔗 <a href=\\\"{html.escape(final_url, quote=True)}\\\">मूल समाचार / सूचना देखें</a>"
-                )
+                    text += "इस RSS में अतिरिक्त विवरण उपलब्ध नहीं है। पूरी जानकारी के लिए मूल खबर खोलें।\n\n"
+                if official_url(final_url):
+                    text += "🎯 <b>ध्यान दें:</b> पात्रता, तिथि और निर्देश मूल सरकारी आदेश से सत्यापित करें।\n"
+                    link_label = "सरकारी आधिकारिक सूचना खोलें"
+                else:
+                    text += "ℹ️ <b>नोट:</b> यह मीडिया रिपोर्ट है; सरकारी आदेश/अधिसूचना से पुष्टि करें।\n"
+                    link_label = "पूरी मीडिया खबर पढ़ें"
+                text += f'🔗 <a href="{html.escape(final_url, quote=True)}">{link_label}</a>'
                 delivered = False
                 for chat_id in CHAT_IDS:
                     send_error = None
@@ -351,7 +371,7 @@ async def scan_once(bot: Bot):
                                 from telegram.error import BadRequest
                                 if not isinstance(html_exc, BadRequest):
                                     raise
-                                plain_text = html.unescape(re.sub(r"</?(?:b|i|u|code|pre|a)(?:\\s+[^>]*)?>", "", text))
+                                plain_text = html.unescape(re.sub(r"</?(?:b|i|u|code|pre|a)(?:\s+[^>]*)?>", "", text))
                                 plain_text = re.sub(r"<[^>]+>", "", plain_text)
                                 await bot.send_message(
                                     chat_id=chat_id, text=plain_text[:4000],
@@ -396,8 +416,8 @@ async def scan_once(bot: Bot):
                 try:
                     await bot.send_message(
                         chat_id=chat_id,
-                        text="✅ <b>News Monitor Recovery</b>\\n"
-                             "आधिकारिक सरकारी लिंक फिर से मिलने लगे हैं।\\n"
+                        text="✅ <b>News Monitor Recovery</b>\n"
+                             "आधिकारिक सरकारी लिंक फिर से मिलने लगे हैं।\n"
                              + html.escape(HEALTH["last_scan_summary"]),
                         parse_mode="HTML"
                     )
@@ -407,12 +427,12 @@ async def scan_once(bot: Bot):
 
     if HEALTH["no_official_streak"] >= 3 and not HEALTH["diagnostic_alert_active"]:
         alert = (
-            "⚠️ <b>News Monitor Diagnostic Alert</b>\\n"
-            "लगातार 3 स्कैन में नई RSS खबरें मिलीं, लेकिन एक भी आधिकारिक सरकारी लिंक सत्यापित नहीं हुआ।\\n\\n"
-            f"RSS आइटम: {total_entries}\\n"
-            f"ताज़ा आइटम: {HEALTH['fresh_entries']}\\n"
-            f"लिंक जाँच विफल: {HEALTH['link_failures']}\\n\\n"
-            "संभावित कारण: Google News redirect URL resolve नहीं हो रहा या RSS publisher metadata में official URL नहीं है।\\n"
+            "⚠️ <b>News Monitor Diagnostic Alert</b>\n"
+            "लगातार 3 स्कैन में नई RSS खबरें मिलीं, लेकिन एक भी आधिकारिक सरकारी लिंक सत्यापित नहीं हुआ।\n\n"
+            f"RSS आइटम: {total_entries}\n"
+            f"ताज़ा आइटम: {HEALTH['fresh_entries']}\n"
+            f"लिंक जाँच विफल: {HEALTH['link_failures']}\n\n"
+            "संभावित कारण: Google News redirect URL resolve नहीं हो रहा या RSS publisher metadata में official URL नहीं है।\n"
             "Bot और Telegram delivery चालू हैं; लिंक पहचानने वाले चरण की जाँच आवश्यक है।"
         )
         for chat_id in CHAT_IDS:
@@ -439,10 +459,10 @@ async def monitor_loop(bot: Bot):
 
 async def start_command(update, context):
     await update.effective_message.reply_text(
-        "नमस्कार! यह India + Rajasthan Government News Monitor Bot है।\\n\\n"
-        "यह सरकारी वेबसाइटों से नई सूचनाएँ खोजकर निर्धारित Telegram चैनल पर भेजता है।\\n"
-        "अपनी स्थिति देखने के लिए /status भेजें।\\n"
-        "अंतिम जाँच के लिए /lastcheck भेजें।\\n"
+        "नमस्कार! यह India + Rajasthan Government News Monitor Bot है।\n\n"
+        "यह सरकारी वेबसाइटों से नई सूचनाएँ खोजकर निर्धारित Telegram चैनल पर भेजता है।\n"
+        "अपनी स्थिति देखने के लिए /status भेजें।\n"
+        "अंतिम जाँच के लिए /lastcheck भेजें।\n"
         "कमांड सूची के लिए /help भेजें।"
     )
 
@@ -475,11 +495,11 @@ async def status_command(update, context):
         f"🎯 <b>Destination:</b> <code>{html.escape(destination)}</code>",
         f"⚠️ <b>Feed Error:</b> {html.escape(str(HEALTH['last_error'] or 'कोई नहीं'))}",
     ]
-    await update.effective_message.reply_text("\\n".join(lines), parse_mode="HTML")
+    await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
 
 async def lastcheck_command(update, context):
     await update.effective_message.reply_text(
-        f"🔎 पिछली News जाँच: {HEALTH['last_check'] or 'अभी तक नहीं हुई'}\\n"
+        f"🔎 पिछली News जाँच: {HEALTH['last_check'] or 'अभी तक नहीं हुई'}\n"
         f"📬 पिछली सफल delivery: {HEALTH['last_delivery'] or 'अभी तक नहीं हुई'}"
     )
 
@@ -492,7 +512,7 @@ async def test_command(update, context):
         try:
             await context.bot.send_message(
                 chat_id=chat_id,
-                text="✅ Government News Bot Test Message\\n"
+                text="✅ Government News Bot Test Message\n"
                      "Telegram channel delivery सही है। यह केवल परीक्षण संदेश है।"
             )
             sent += 1
@@ -505,10 +525,10 @@ async def test_command(update, context):
 
 async def help_command(update, context):
     await update.effective_message.reply_text(
-        "/start – बॉट का परिचय\\n"
-        "/status – बॉट और News Monitoring की स्थिति\\n"
-        "/lastcheck – पिछली जाँच और सफल delivery का समय\\n"
-        "/test – चैनल पर परीक्षण संदेश भेजें\\n"
+        "/start – बॉट का परिचय\n"
+        "/status – बॉट और News Monitoring की स्थिति\n"
+        "/lastcheck – पिछली जाँच और सफल delivery का समय\n"
+        "/test – चैनल पर परीक्षण संदेश भेजें\n"
         "/help – कमांड सूची"
     )
 
