@@ -44,6 +44,9 @@ DEFAULT_FEEDS = [
     "https://news.google.com/rss/search?q=site%3Arpsc.rajasthan.gov.in+RPSC+recruitment+result+exam+notification&hl=en-IN&gl=IN&ceid=IN:en",
     "https://news.google.com/rss/search?q=site%3Arssb.rajasthan.gov.in+RSSB+recruitment+result+exam+notification&hl=en-IN&gl=IN&ceid=IN:en",
     "https://news.google.com/rss/search?q=site%3Arajasthan.gov.in+Rajasthan+recruitment+exam+result+scheme&hl=hi&gl=IN&ceid=IN:hi",
+    "https://news.google.com/rss/search?q=site%3Abhaskar.com+Rajasthan+government+recruitment+education+Churu&hl=hi&gl=IN&ceid=IN:hi",
+    "https://news.google.com/rss/search?q=site%3Apatrika.com+Rajasthan+government+recruitment+education&hl=hi&gl=IN&ceid=IN:hi",
+    "https://news.google.com/rss/search?q=site%3Apatrika.com+Churu+Sardarshahar+Taranagar+Ratangarh+news&hl=hi&gl=IN&ceid=IN:hi",
 ]
 FEEDS = [x.strip() for x in os.getenv("FEED_URLS", "").split(",") if x.strip()] or DEFAULT_FEEDS
 
@@ -71,6 +74,18 @@ def official_url(url: str) -> bool:
         }
     except Exception:
         return False
+
+MEDIA_SUFFIXES = (".bhaskar.com", ".patrika.com")
+
+def media_url(url: str) -> bool:
+    try:
+        host = (urlparse(url).hostname or "").lower().rstrip(".")
+        return host.endswith(MEDIA_SUFFIXES) or host in {"bhaskar.com", "patrika.com"}
+    except Exception:
+        return False
+
+def trusted_news_url(url: str) -> bool:
+    return official_url(url) or media_url(url)
 
 def init_db():
     with sqlite3.connect(DB_PATH) as db:
@@ -270,7 +285,7 @@ async def scan_once(bot: Bot):
                 # Google News RSS sometimes keeps its own redirect URL even after
                 # a successful request. Fall back to the publisher URL advertised
                 # in the RSS source metadata, but only if that host is official.
-                if not official_url(final_url):
+                if not trusted_news_url(final_url):
                     source_meta = entry.get("source") or {}
                     source_url = (source_meta.get("href") or "").strip()
                     if official_url(source_url):
@@ -278,7 +293,7 @@ async def scan_once(bot: Bot):
                                  urlparse(source_url).hostname)
                         final_url = source_url
 
-                if not official_url(final_url):
+                if not trusted_news_url(final_url):
                     HEALTH["link_failures"] += 1
                     log.info("Skipping item: no official URL found | title=%s | resolved=%s | source=%s",
                              title[:180], final_url[:220],
@@ -294,6 +309,7 @@ async def scan_once(bot: Bot):
                     continue
 
                 HEALTH["official_candidates"] += 1
+                source_label = "आधिकारिक सरकारी सूचना" if official_url(final_url) else "मीडिया रिपोर्ट"
                 item_id = stable_id(entry, final_url)
                 if not item_id:
                     continue
@@ -303,7 +319,8 @@ async def scan_once(bot: Bot):
                     continue
                 summary = detailed_summary(entry)
                 text = (
-                    "🆕 <b>नई सरकारी सूचना</b>\\n"
+                    "🆕 <b>नई सरकारी/राजस्थान समाचार सूचना</b>\\n"
+                    f"📰 <b>श्रेणी:</b> {source_label}\\n"
                     f"<b>{html.escape(title[:350])}</b>\\n\\n"
                     f"🏛 <b>विभाग/स्रोत:</b> <code>{html.escape(urlparse(final_url).hostname or '')}</code>\\n"
                     f"🕒 <b>प्रकाशन:</b> {html.escape(publication_time(entry))}\\n"
@@ -316,7 +333,7 @@ async def scan_once(bot: Bot):
                 text += (
                     "\\n🎯 <b>महत्त्व:</b> पात्रता, निर्देश, तिथि और लाभ/प्रभाव की पुष्टि "
                     "मूल आधिकारिक दस्तावेज़ से करें।\\n"
-                    f"🔗 <a href=\\\"{html.escape(final_url, quote=True)}\\\">आधिकारिक सूचना / दस्तावेज़ देखें</a>"
+                    f"🔗 <a href=\\\"{html.escape(final_url, quote=True)}\\\">मूल समाचार / सूचना देखें</a>"
                 )
                 delivered = False
                 for chat_id in CHAT_IDS:
