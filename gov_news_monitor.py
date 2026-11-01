@@ -13,6 +13,7 @@ import sqlite3
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse, urljoin
 
@@ -30,6 +31,7 @@ CHAT_IDS = [x.strip() for x in os.getenv("TELEGRAM_CHAT_IDS", "").split(",") if 
 POLL_SECONDS = max(120, int(os.getenv("POLL_SECONDS", "120")))
 DB_PATH = os.getenv("NEWS_DB_PATH", "gov_news.sqlite3")
 MAX_NEWS_AGE_HOURS = max(1, int(os.getenv("MAX_NEWS_AGE_HOURS", "24")) )
+INDIA_TZ = ZoneInfo("Asia/Kolkata")
 
 # Add or replace feeds in Render's FEED_URLS environment variable (comma-separated).
 # These Google News RSS queries are discovery feeds; a story is sent only after
@@ -120,7 +122,7 @@ def entry_datetime(entry):
 
 def publication_time(entry) -> str:
     dt = entry_datetime(entry)
-    return dt.astimezone().strftime("%d-%m-%Y %I:%M %p %Z") if dt else "प्रकाशन समय उपलब्ध नहीं"
+    return dt.astimezone(INDIA_TZ).strftime("%d-%m-%Y %I:%M:%S %p IST") if dt else "प्रकाशन समय उपलब्ध नहीं"
 
 def detailed_summary(entry) -> str:
     chunks = []
@@ -223,7 +225,7 @@ async def send_official_documents(bot: Bot, chat_id: str, page_url: str, title: 
     return sent
 
 async def scan_once(bot: Bot):
-    HEALTH["last_check"] = datetime.now().astimezone().strftime("%d-%m-%Y %I:%M:%S %p %Z")
+    HEALTH["last_check"] = datetime.now(INDIA_TZ).strftime("%d-%m-%Y %I:%M:%S %p IST")
     HEALTH["feeds_checked"] = 0
     HEALTH["entries_seen"] = 0
     HEALTH["official_candidates"] = 0
