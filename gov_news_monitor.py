@@ -5,6 +5,8 @@ whose final source URL is on an official Indian government domain.
 """
 import asyncio
 import html
+import io
+import re
 import logging
 import os
 import sqlite3
@@ -12,7 +14,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 import feedparser
 from telegram import Bot
@@ -155,6 +157,68 @@ def parse_feed(url: str):
     response.raise_for_status()
     return feedparser.parse(response.content)
 
+
+def find_official_documents(page_url: str):
+    """Find up to three PDF/Word attachments linked from an official page."""
+    import requests
+    from html.parser import HTMLParser
+    class LinkParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.links = []
+        def handle_starttag(self, tag, attrs):
+            if tag.lower() == "a":
+                href = dict(attrs).get("href", "")
+                if href:
+                    self.links.append(urljoin(page_url, href))
+    found = []
+    if urlparse(page_url).path.lower().endswith((".pdf", ".doc", ".docx")):
+        found.append(page_url)
+    try:
+        res = requests.get(page_url, timeout=(10, 20), headers={"User-Agent": "Mozilla/5.0"})
+        if res.ok and "text/html" in res.headers.get("Content-Type", "").lower():
+            parser = LinkParser()
+            parser.feed(res.text[:2000000])
+            for link in parser.links:
+                if official_url(link) and urlparse(link).path.lower().endswith((".pdf", ".doc", ".docx")):
+                    found.append(link)
+    except Exception:
+        log.exception("Official page document discovery failed: %s", page_url)
+    return list(dict.fromkeys(found))[:3]
+
+async def send_official_documents(bot: Bot, chat_id: str, page_url: str, title: str):
+    import requests
+    links = await asyncio.to_thread(find_official_documents, page_url)
+    sent = 0
+    for link in links:
+        try:
+            res = await asyncio.to_thread(
+                requests.get, link, timeout=(10, 30),
+                headers={"User-Agent": "Mozilla/5.0"}, allow_redirects=True
+            )
+            res.raise_for_status()
+            if not official_url(res.url):
+                continue
+            ctype = res.headers.get("Content-Type", "").lower()
+            path = urlparse(res.url).path.lower()
+            if not (path.endswith((".pdf", ".doc", ".docx")) or
+                    any(kind in ctype for kind in ("application/pdf", "msword", "wordprocessingml"))):
+                continue
+            if len(res.content) > 18 * 1024 * 1024:
+                log.warning("Skipping document over 18 MB: %s", res.url)
+                continue
+            filename = res.url.rsplit("/", 1)[-1].split("?")[0] or "official_document"
+            if not any(filename.lower().endswith(ext) for ext in (".pdf", ".doc", ".docx")):
+                filename += ".pdf" if "pdf" in ctype else ".doc"
+            data = io.BytesIO(res.content)
+            data.name = filename
+            await bot.send_document(chat_id=chat_id, document=data,
+                                     caption="📎 मूल सरकारी दस्तावेज़: " + title[:700])
+            sent += 1
+        except Exception:
+            log.exception("Official document download/send failed: %s", link)
+    return sent
+
 async def scan_once(bot: Bot):
     HEALTH["last_check"] = datetime.now().astimezone().strftime("%d-%m-%Y %I:%M:%S %p %Z")
     HEALTH["feeds_checked"] = 0
@@ -230,6 +294,8 @@ async def scan_once(bot: Bot):
                         await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML",
                                                disable_web_page_preview=True)
                         delivered = True
+                        docs_sent = await send_official_documents(bot, chat_id, final_url, title)
+                        log.info("Official attachments sent=%d for: %s", docs_sent, title[:160])
                         HEALTH["last_delivery"] = datetime.now().astimezone().strftime("%d-%m-%Y %I:%M:%S %p %Z")
                         HEALTH["items_sent"] += 1
                     except Exception:
