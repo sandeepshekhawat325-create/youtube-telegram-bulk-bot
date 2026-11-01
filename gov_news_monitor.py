@@ -341,6 +341,81 @@ async def send_official_documents(bot: Bot, chat_id: str, page_url: str, title: 
             log.exception("Official document download/send failed: %s", link)
     return sent
 
+
+def extract_news_image(entry, article_url: str = "") -> str:
+    """Get a likely story image from RSS media fields or trusted publisher OG metadata."""
+    from html.parser import HTMLParser
+    from urllib.parse import urljoin, urlparse
+
+    candidates = []
+    for key in ("media_content", "media_thumbnail"):
+        items = entry.get(key) or []
+        if isinstance(items, dict):
+            items = [items]
+        for item in items:
+            if isinstance(item, dict):
+                candidates.append(item.get("url") or item.get("href") or "")
+    for item in (entry.get("links") or []):
+        if isinstance(item, dict) and (
+            "image" in str(item.get("type", "")).lower()
+            or str(item.get("rel", "")).lower() == "enclosure"
+        ):
+            candidates.append(item.get("href") or "")
+
+    class ImageMetaParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.images = []
+        def handle_starttag(self, tag, attrs):
+            if tag.lower() != "meta":
+                return
+            attrs = dict(attrs)
+            key = (attrs.get("property") or attrs.get("name") or "").lower()
+            if key in {"og:image", "og:image:secure_url", "twitter:image", "twitter:image:src"}:
+                if attrs.get("content"):
+                    self.images.append(attrs["content"].strip())
+
+    if article_url and trusted_news_url(article_url):
+        try:
+            response = requests.get(
+                article_url, timeout=(6, 10), allow_redirects=True,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; GovNewsMonitor/1.4)"}
+            )
+            if response.ok and trusted_news_url(response.url):
+                parser = ImageMetaParser()
+                parser.feed(response.content[:1000000].decode("utf-8", errors="replace"))
+                candidates = parser.images + candidates
+        except Exception:
+            log.info("Could not fetch featured image metadata: %s", article_url)
+
+    for candidate in candidates:
+        candidate = str(candidate).strip()
+        if not candidate:
+            continue
+        image_url = urljoin(article_url, candidate)
+        parsed = urlparse(image_url)
+        if parsed.scheme in {"http", "https"} and parsed.hostname and not parsed.username:
+            return image_url
+    return ""
+
+
+async def send_news_image(bot: Bot, chat_id, image_url: str, title: str) -> bool:
+    """Send the publisher's featured image when Telegram can retrieve it."""
+    if not image_url:
+        return False
+    try:
+        await bot.send_photo(
+            chat_id=chat_id,
+            photo=image_url,
+            caption=html.escape(title[:900]),
+            parse_mode="HTML"
+        )
+        return True
+    except Exception as exc:
+        log.info("Featured image unavailable; sending text-only news: %s", str(exc)[:200])
+        return False
+
+
 async def scan_once(bot: Bot):
     HEALTH["last_check"] = datetime.now(INDIA_TZ).strftime("%d-%m-%Y %I:%M:%S %p IST")
     HEALTH["feeds_checked"] = 0
@@ -417,6 +492,7 @@ async def scan_once(bot: Bot):
                     log.info("Skipping duplicate item: %s", title[:180])
                     continue
                 summary = detailed_summary(entry, final_url)
+                news_image = await asyncio.to_thread(extract_news_image, entry, final_url)
                 source_host = urlparse(final_url).hostname or "अज्ञात स्रोत"
                 source_label = "आधिकारिक सरकारी सूचना" if official_url(final_url) else "मीडिया रिपोर्ट"
                 text = (
@@ -442,6 +518,8 @@ async def scan_once(bot: Bot):
                     send_error = None
                     for attempt in range(1, 3):
                         try:
+                            if news_image:
+                                await send_news_image(bot, chat_id, news_image, title)
                             try:
                                 await bot.send_message(
                                     chat_id=chat_id, text=text, parse_mode="HTML",
