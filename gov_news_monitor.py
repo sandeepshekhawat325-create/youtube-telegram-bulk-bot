@@ -48,7 +48,10 @@ FEEDS = [x.strip() for x in os.getenv("FEED_URLS", "").split(",") if x.strip()] 
 # Runtime health details shown by /status and /lastcheck.
 HEALTH = {"last_check": None, "last_delivery": None, "last_error": None,
           "feeds_checked": 0, "items_sent": 0, "entries_seen": 0,
-          "official_candidates": 0, "last_scan_summary": "अभी कोई जाँच नहीं हुई"}
+          "fresh_entries": 0, "link_failures": 0,
+          "official_candidates": 0, "no_official_streak": 0,
+          "diagnostic_alert_active": False,
+          "last_scan_summary": "अभी कोई जाँच नहीं हुई"}
 
 OFFICIAL_SUFFIXES = (
     ".gov.in", ".nic.in", ".rajasthan.gov.in", ".rajasthan.nic.in",
@@ -224,6 +227,8 @@ async def scan_once(bot: Bot):
     HEALTH["feeds_checked"] = 0
     HEALTH["entries_seen"] = 0
     HEALTH["official_candidates"] = 0
+    HEALTH["fresh_entries"] = 0
+    HEALTH["link_failures"] = 0
     total_entries = 0
     sent_this_cycle = 0
     log.info("Starting news scan: %d feeds; destinations=%d", len(FEEDS), len(CHAT_IDS))
@@ -250,6 +255,7 @@ async def scan_once(bot: Bot):
                     log.info("Skipping stale/future item (%s): %s", publication_time(entry), title[:180])
                     continue
 
+                HEALTH["fresh_entries"] += 1
                 final_url = await asyncio.to_thread(resolve_entry_url, entry)
 
                 # Google News RSS sometimes keeps its own redirect URL even after
@@ -264,6 +270,7 @@ async def scan_once(bot: Bot):
                         final_url = source_url
 
                 if not official_url(final_url):
+                    HEALTH["link_failures"] += 1
                     log.info("Skipping item: no official URL found | title=%s | resolved=%s | source=%s",
                              title[:180], final_url[:220],
                              (entry.get("source") or {}).get("href", "")[:220])
@@ -321,6 +328,43 @@ async def scan_once(bot: Bot):
         f"भेजी गई खबरें {sent_this_cycle}, सफल feeds {HEALTH['feeds_checked']}/{len(FEEDS)}"
     )
     log.info("News scan complete: %s", HEALTH["last_scan_summary"])
+
+    # Notify the owner/channel only when the same actionable problem persists.
+    # Avoid false alarms when a scan simply contains no fresh RSS items.
+    if HEALTH["fresh_entries"] > 0 and HEALTH["official_candidates"] == 0:
+        HEALTH["no_official_streak"] += 1
+    elif HEALTH["official_candidates"] > 0:
+        HEALTH["no_official_streak"] = 0
+        if HEALTH["diagnostic_alert_active"]:
+            for chat_id in CHAT_IDS:
+                try:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text="✅ <b>News Monitor Recovery</b>\\n"
+                             "आधिकारिक सरकारी लिंक फिर से मिलने लगे हैं।\\n"
+                             + html.escape(HEALTH["last_scan_summary"]),
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    log.exception("Recovery alert failed for %s", chat_id)
+            HEALTH["diagnostic_alert_active"] = False
+
+    if HEALTH["no_official_streak"] >= 3 and not HEALTH["diagnostic_alert_active"]:
+        alert = (
+            "⚠️ <b>News Monitor Diagnostic Alert</b>\\n"
+            "लगातार 3 स्कैन में नई RSS खबरें मिलीं, लेकिन एक भी आधिकारिक सरकारी लिंक सत्यापित नहीं हुआ।\\n\\n"
+            f"RSS आइटम: {total_entries}\\n"
+            f"ताज़ा आइटम: {HEALTH['fresh_entries']}\\n"
+            f"लिंक जाँच विफल: {HEALTH['link_failures']}\\n\\n"
+            "संभावित कारण: Google News redirect URL resolve नहीं हो रहा या RSS publisher metadata में official URL नहीं है।\\n"
+            "Bot और Telegram delivery चालू हैं; लिंक पहचानने वाले चरण की जाँच आवश्यक है।"
+        )
+        for chat_id in CHAT_IDS:
+            try:
+                await bot.send_message(chat_id=chat_id, text=alert, parse_mode="HTML")
+            except Exception:
+                log.exception("Diagnostic alert failed for %s", chat_id)
+        HEALTH["diagnostic_alert_active"] = True
 
 async def monitor_loop(bot: Bot):
     # Never let a transient feed/API/database error permanently stop monitoring.
