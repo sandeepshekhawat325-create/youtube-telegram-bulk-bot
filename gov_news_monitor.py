@@ -100,19 +100,35 @@ def stable_id(entry, final_url: str) -> str:
     return str(entry.get("id") or entry.get("guid") or final_url)
 
 def parse_feed(url: str):
-    return feedparser.parse(url)
+    import requests
+    response = requests.get(
+        url, timeout=(10, 25),
+        headers={"User-Agent": "Mozilla/5.0 (compatible; GovNewsMonitor/1.1)"}
+    )
+    response.raise_for_status()
+    return feedparser.parse(response.content)
 
 async def scan_once(bot: Bot):
     HEALTH["last_check"] = datetime.now().astimezone().strftime("%d-%m-%Y %I:%M:%S %p %Z")
     HEALTH["feeds_checked"] = 0
+    total_entries = 0
+    sent_this_cycle = 0
+    log.info("Starting news scan: %d feeds; destinations=%d", len(FEEDS), len(CHAT_IDS))
+    if not CHAT_IDS:
+        log.error("No Telegram destination configured; set TELEGRAM_CHAT_IDS in Render.")
     for feed_url in FEEDS:
         try:
             parsed = await asyncio.to_thread(parse_feed, feed_url)
             HEALTH["feeds_checked"] += 1
-            for entry in parsed.entries[:50]:
+            entries = parsed.entries[:50]
+            total_entries += len(entries)
+            log.info("Feed fetched: %s | entries=%d | bozo=%s",
+                     urlparse(feed_url).hostname, len(entries), getattr(parsed, "bozo", False))
+            for entry in entries:
                 title = (entry.get("title") or "शीर्षक उपलब्ध नहीं").strip()
                 final_url = await asyncio.to_thread(resolve_entry_url, entry)
                 if not official_url(final_url):
+                    log.debug("Skipping non-official/unresolved item: %s", final_url[:300])
                     continue
                 item_id = stable_id(entry, final_url)
                 if not item_id or was_sent(item_id):
@@ -150,14 +166,27 @@ async def scan_once(bot: Bot):
                         log.exception("Telegram delivery failed for destination %s", chat_id)
                 if delivered:
                     mark_sent(item_id)
+                    sent_this_cycle += 1
         except Exception:
             HEALTH["last_error"] = feed_url
             log.exception("Feed scan failed: %s", feed_url)
+    log.info("News scan complete: entries=%d sent=%d feeds_ok=%d/%d",
+             total_entries, sent_this_cycle, HEALTH["feeds_checked"], len(FEEDS))
 
 async def monitor_loop(bot: Bot):
+    # Never let a transient feed/API/database error permanently stop monitoring.
     while True:
-        await scan_once(bot)
-        await asyncio.sleep(POLL_SECONDS)
+        started = datetime.now(timezone.utc)
+        try:
+            await scan_once(bot)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Unexpected error in monitoring cycle; will retry")
+        elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+        delay = max(5, POLL_SECONDS - int(elapsed))
+        log.info("Next news scan in %s seconds", delay)
+        await asyncio.sleep(delay)
 
 async def start_command(update, context):
     await update.effective_message.reply_text(
