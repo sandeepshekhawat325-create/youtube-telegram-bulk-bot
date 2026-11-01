@@ -51,7 +51,9 @@ FEEDS = [x.strip() for x in os.getenv("FEED_URLS", "").split(",") if x.strip()] 
 HEALTH = {"last_check": None, "last_delivery": None, "last_error": None,
           "feeds_checked": 0, "items_sent": 0, "entries_seen": 0,
           "fresh_entries": 0, "link_failures": 0,
-          "official_candidates": 0, "no_official_streak": 0,
+          "official_candidates": 0, "duplicate_items": 0,
+          "delivery_success": 0, "delivery_failed": 0,
+          "no_official_streak": 0,
           "diagnostic_alert_active": False,
           "last_scan_summary": "अभी कोई जाँच नहीं हुई"}
 
@@ -229,6 +231,9 @@ async def scan_once(bot: Bot):
     HEALTH["feeds_checked"] = 0
     HEALTH["entries_seen"] = 0
     HEALTH["official_candidates"] = 0
+    HEALTH["duplicate_items"] = 0
+    HEALTH["delivery_success"] = 0
+    HEALTH["delivery_failed"] = 0
     HEALTH["fresh_entries"] = 0
     HEALTH["link_failures"] = 0
     total_entries = 0
@@ -288,7 +293,11 @@ async def scan_once(bot: Bot):
 
                 HEALTH["official_candidates"] += 1
                 item_id = stable_id(entry, final_url)
-                if not item_id or was_sent(item_id):
+                if not item_id:
+                    continue
+                if was_sent(item_id):
+                    HEALTH["duplicate_items"] += 1
+                    log.info("Skipping duplicate item: %s", title[:180])
                     continue
                 summary = detailed_summary(entry)
                 text = (
@@ -313,11 +322,13 @@ async def scan_once(bot: Bot):
                         await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML",
                                                disable_web_page_preview=True)
                         delivered = True
+                        HEALTH["delivery_success"] += 1
                         docs_sent = await send_official_documents(bot, chat_id, final_url, title)
                         log.info("Official attachments sent=%d for: %s", docs_sent, title[:160])
                         HEALTH["last_delivery"] = datetime.now().astimezone().strftime("%d-%m-%Y %I:%M:%S %p %Z")
                         HEALTH["items_sent"] += 1
                     except Exception:
+                        HEALTH["delivery_failed"] += 1
                         log.exception("Telegram delivery failed for destination %s", chat_id)
                 if delivered:
                     mark_sent(item_id)
@@ -405,6 +416,8 @@ async def status_command(update, context):
         f"📊 इस रनटाइम में भेजी गई News: {HEALTH['items_sent']}\\n"
         f"📡 इस चक्र में जाँची गई feeds: {HEALTH['feeds_checked']}/{len(FEEDS)}\\n"
         f"📰 {HEALTH['last_scan_summary']}\\n"
+        f"♻️ Duplicate News: {HEALTH['duplicate_items']}\\n"
+        f"📤 Telegram Delivery: {HEALTH['delivery_success']} सफल / {HEALTH['delivery_failed']} असफल\\n"
         f"📢 Destination: {destination}\\n"
         f"⚠️ पिछली feed error: {HEALTH['last_error'] or 'कोई दर्ज नहीं'}"
     )
