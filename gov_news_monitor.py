@@ -168,6 +168,13 @@ def main():
     from telegram.ext import Application
     app = (Application.builder().token(BOT_TOKEN)
            .post_init(post_init).post_shutdown(post_shutdown).build())
+    # Python 3.14 no longer implicitly creates a current event loop in
+    # the main thread. python-telegram-bot's run_polling() expects one.
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
     # This is a monitoring-only bot; no user commands are required.
     app.run_polling(drop_pending_updates=True)
 
