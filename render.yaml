@@ -1,20 +1,18 @@
 services:
-  - type: worker
+  - type: web
     name: india-rajasthan-gov-news
     runtime: python
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python gov_news_monitor.py
+    healthCheckPath: /health
     autoDeploy: true
-    disk:
-      name: gov-news-data
-      mountPath: /var/data
-      sizeGB: 1
     envVars:
       - key: BOT_TOKEN
         sync: false
       - key: TELEGRAM_CHAT_IDS
-        sync: false
+        value: "@currentaffair_news"
       - key: POLL_SECONDS
         value: "120"
       - key: NEWS_DB_PATH
-        value: /var/data/gov_news.sqlite3
+        value: gov_news.sqlite3
