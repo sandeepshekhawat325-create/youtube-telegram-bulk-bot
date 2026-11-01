@@ -233,6 +233,7 @@ async def scan_once(bot: Bot):
         try:
             parsed = await asyncio.to_thread(parse_feed, feed_url)
             HEALTH["feeds_checked"] += 1
+            HEALTH["last_scan_summary"] = f"जाँच जारी: {HEALTH['feeds_checked']}/{len(FEEDS)} feeds"
             entries = parsed.entries[:50]
             total_entries += len(entries)
             HEALTH["entries_seen"] += len(entries)
@@ -240,6 +241,15 @@ async def scan_once(bot: Bot):
                      urlparse(feed_url).hostname, len(entries), getattr(parsed, "bozo", False))
             for entry in entries:
                 title = (entry.get("title") or "शीर्षक उपलब्ध नहीं").strip()
+                published_dt = entry_datetime(entry)
+                if published_dt is None:
+                    log.info("Skipping item with no verifiable publication date: %s", title[:180])
+                    continue
+                age = datetime.now(timezone.utc) - published_dt
+                if age < timedelta(minutes=-10) or age > timedelta(hours=MAX_NEWS_AGE_HOURS):
+                    log.info("Skipping stale/future item (%s): %s", publication_time(entry), title[:180])
+                    continue
+
                 final_url = await asyncio.to_thread(resolve_entry_url, entry)
 
                 # Google News RSS sometimes keeps its own redirect URL even after
