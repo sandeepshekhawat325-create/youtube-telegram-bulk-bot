@@ -1,0 +1,20 @@
+services:
+  - type: worker
+    name: india-rajasthan-gov-news
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python gov_news_monitor.py
+    autoDeploy: true
+    disk:
+      name: gov-news-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_IDS
+        sync: false
+      - key: POLL_SECONDS
+        value: "120"
+      - key: NEWS_DB_PATH
+        value: /var/data/gov_news.sqlite3
