@@ -1,30 +1,33 @@
 # India + Rajasthan Government News Monitor
 
-A Telegram worker that checks RSS discovery feeds every 2 minutes and forwards only items whose final resolved link belongs to an official Indian government domain.
+A Telegram news monitor that checks configured RSS discovery feeds every 2 minutes and forwards new items only when their resolved source URL belongs to an approved official Indian government domain.
 
-## Deploy on Render
+## Render Free Web Service setup
 
-1. Create a Telegram bot with BotFather and copy its token.
-2. In Render, create a **Background Worker** from this repository. Render can also use the included `render.yaml`.
-3. Add environment variables:
-   - `BOT_TOKEN`: token from BotFather
-   - `TELEGRAM_CHAT_IDS`: leave blank until you are ready; later add a channel username such as `@your_channel` or numeric chat ID. For multiple destinations, separate with commas.
+1. In Render, create or use a **Web Service** for this repository. The included `render.yaml` is configured as a Free Web Service.
+2. Build command: `pip install -r requirements.txt`
+3. Start command: `python gov_news_monitor.py`
+4. Health check path: `/health`
+5. Set environment variables:
+   - `BOT_TOKEN`: your current Telegram bot token. Keep it secret; never paste it into logs or GitHub.
+   - `TELEGRAM_CHAT_IDS`: `@currentaffair_news` (the bot must be a channel administrator with permission to post).
    - `POLL_SECONDS`: `120`
-4. Add the bot as an administrator to your Telegram channel with permission to post messages.
-5. Deploy. Add your destination later in Render → Environment and redeploy/restart the worker.
+   - `NEWS_DB_PATH`: `gov_news.sqlite3`
+6. Deploy the latest commit and inspect Render Logs for feed fetches and Telegram delivery errors.
 
 ## What it does
 
-- Checks configured RSS feeds every 120 seconds (minimum enforced in code).
-- Uses Google News RSS as discovery, then follows each link and forwards only if the final hostname is an official government domain (`.gov.in`, `.nic.in`, approved Rajasthan domains, PIB, etc.).
-- Stores sent item IDs in SQLite on Render's persistent disk to avoid repeat alerts.
+- Checks configured feeds every 120 seconds while the process is running.
+- Uses Google News RSS for discovery, then follows each link and forwards only if the final hostname passes the official-domain allowlist.
+- Stores sent item IDs in SQLite to reduce duplicate posts.
 - Sends headline, available publication time, summary, and the resolved official link.
-- Supports additional RSS sources through comma-separated `FEED_URLS`.
+- Supports additional feeds through comma-separated `FEED_URLS`.
+- Provides Telegram commands: `/start`, `/status`, `/lastcheck`, and `/help`.
 
-## Important limitations
+## Free-plan limitations (important)
 
-- This is frequent polling, not a guaranteed real-time feed. A department may publish without an RSS feed or may block indexing; two-minute checks cannot guarantee every department's information.
-- Some Google News links may not resolve to an official page; those items are intentionally skipped.
-- To expand coverage, add verified official RSS feeds or department notice-page feeds to `FEED_URLS`.
-- Render Background Worker and persistent disk may require a paid plan. Check current Render pricing before deploying.
-- Do not put bot tokens or credentials in source code or commit them to GitHub.
+- Render Free Web Services spin down after 15 minutes without inbound traffic and may restart. Therefore **Free hosting cannot guarantee continuous 24/7 monitoring**. A health check path helps Render verify service health; it does not guarantee that the service stays awake.
+- The free filesystem is ephemeral. The SQLite database can be lost on restart/redeploy, which may cause previously sent stories to be considered new again.
+- For reliable always-on monitoring and persistent deduplication, use a paid Render Background Worker with a Persistent Disk, or another always-on host plus persistent database.
+- This is frequent polling, not guaranteed real-time or exhaustive coverage. Departments may not expose RSS feeds, and some links may fail to resolve to an official page.
+- Never commit bot tokens or credentials to GitHub. If a token was exposed, revoke it with BotFather and update Render's `BOT_TOKEN`.
