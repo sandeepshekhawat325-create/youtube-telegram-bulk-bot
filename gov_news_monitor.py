@@ -142,104 +142,104 @@ def publication_time(entry) -> str:
     dt = entry_datetime(entry)
     return dt.astimezone(INDIA_TZ).strftime("%d-%m-%Y %I:%M:%S %p IST") if dt else "प्रकाशन समय उपलब्ध नहीं"
 
+def repair_mojibake(value: str) -> str:
+    """Repair common UTF-8 text mistakenly decoded as Latin-1/Windows-1252."""
+    if not value:
+        return value
+    if any(marker in value for marker in ("à¤", "à¦", "Ã", "â€™", "â€œ", "â€")):
+        for encoding in ("latin-1", "cp1252"):
+            try:
+                fixed = value.encode(encoding).decode("utf-8")
+                if fixed.count("�") <= value.count("�") and not any(
+                    marker in fixed for marker in ("à¤", "à¦", "Ã", "â€™", "â€œ", "â€")
+                ):
+                    return fixed
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                continue
+    return value
+
+
 def detailed_summary(entry, article_url: str = "") -> str:
-    """Build a fuller news detail from RSS description and the publisher page's public meta/paragraph text."""
+    """Prefer the actual RSS story description and relevant article metadata, not site-wide boilerplate."""
     from html.parser import HTMLParser
     import requests
 
-    class ArticleParser(HTMLParser):
+    class TextParser(HTMLParser):
         def __init__(self):
             super().__init__()
-            self.meta = []
-            self.paragraphs = []
-            self.in_paragraph = False
-            self.in_ignored = 0
-            self.current = []
-
-        def handle_starttag(self, tag, attrs):
-            attrs = dict(attrs)
-            tag = tag.lower()
-            if tag == "meta":
-                key = (attrs.get("property") or attrs.get("name") or "").lower()
-                if key in {"og:description", "description", "twitter:description"}:
-                    content = attrs.get("content", "").strip()
-                    if content:
-                        self.meta.append(content)
-            elif tag in {"script", "style", "noscript"}:
-                self.in_ignored += 1
-            elif tag == "p" and not self.in_ignored:
-                self.in_paragraph = True
-                self.current = []
-
-        def handle_endtag(self, tag):
-            tag = tag.lower()
-            if tag in {"script", "style", "noscript"} and self.in_ignored:
-                self.in_ignored -= 1
-            elif tag == "p" and self.in_paragraph:
-                value = " ".join(" ".join(self.current).split())
-                if len(value) > 45:
-                    self.paragraphs.append(value)
-                self.in_paragraph = False
-                self.current = []
-
+            self.parts = []
         def handle_data(self, data):
-            if self.in_ignored:
-                return
-            if self.in_paragraph:
-                self.current.append(data)
+            self.parts.append(data)
 
-    title = (entry.get("title") or "").strip()
-    rss_chunks = []
+    class MetaParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.descriptions = []
+        def handle_starttag(self, tag, attrs):
+            if tag.lower() != "meta":
+                return
+            attrs = dict(attrs)
+            key = (attrs.get("property") or attrs.get("name") or "").lower()
+            if key in {"og:description", "twitter:description", "description"}:
+                value = attrs.get("content", "").strip()
+                if value:
+                    self.descriptions.append(value)
+
+    title = repair_mojibake((entry.get("title") or "").strip())
+    candidates = []
+    # RSS description is usually the most story-specific text; keep its order.
     for key in ("content", "summary_detail", "summary", "description"):
         value = entry.get(key)
         if isinstance(value, list):
-            rss_chunks.extend(part.get("value", "") for part in value if isinstance(part, dict))
+            candidates.extend(part.get("value", "") for part in value if isinstance(part, dict))
         elif isinstance(value, dict):
-            rss_chunks.append(value.get("value", ""))
+            candidates.append(value.get("value", ""))
         elif isinstance(value, str):
-            rss_chunks.append(value)
+            candidates.append(value)
 
-    parser = ArticleParser()
+    # Add only page-level description metadata, not every paragraph on the publisher site.
     if article_url and trusted_news_url(article_url):
         try:
             response = requests.get(
                 article_url, timeout=(8, 15), allow_redirects=True,
-                headers={"User-Agent": "Mozilla/5.0 (compatible; GovNewsMonitor/1.2)"}
+                headers={"User-Agent": "Mozilla/5.0 (compatible; GovNewsMonitor/1.3)"}
             )
             if response.ok and trusted_news_url(response.url):
-                parser.feed(response.text[:1500000])
+                response.encoding = response.apparent_encoding or response.encoding
+                meta = MetaParser()
+                meta.feed(response.text[:1500000])
+                candidates.extend(meta.descriptions)
         except Exception:
-            log.info("Could not fetch full publisher details: %s", article_url)
+            log.info("Could not fetch article description metadata: %s", article_url)
 
-    candidates = parser.meta + parser.paragraphs + rss_chunks
     cleaned = []
     seen = set()
+    boilerplate = (
+        "read all hindi breaking news", "this website follows", "statutory provisions",
+        "copyright ©", "all rights reserved", "subscribe", "advertisement",
+        "cookie policy", "privacy policy", "terms and conditions"
+    )
     for chunk in candidates:
-        strip = ArticleParser()
-        strip.feed(str(chunk))
-        value = " ".join(" ".join(strip.paragraphs).split())
-        if not value:
-            # RSS descriptions often contain short HTML fragments rather than paragraphs.
-            class TextOnly(HTMLParser):
-                def __init__(self):
-                    super().__init__()
-                    self.parts = []
-                def handle_data(self, data):
-                    self.parts.append(data)
-            text_parser = TextOnly()
-            text_parser.feed(str(chunk))
-            value = " ".join(" ".join(text_parser.parts).split())
+        parser = TextParser()
+        parser.feed(str(chunk))
+        value = " ".join(" ".join(parser.parts).split())
+        value = repair_mojibake(value)
         value = re.sub(r"\\s+", " ", value).strip()
-        if not value or value.lower() == title.lower():
+        if not value or len(value) < 45:
             continue
-        if title and value.lower().startswith(title.lower()):
+        low = value.casefold()
+        if any(term in low for term in boilerplate):
+            continue
+        if title and low == title.casefold():
+            continue
+        if title and low.startswith(title.casefold()):
             value = value[len(title):].lstrip(" :-–—|")
         key = value.casefold()
-        if len(value) > 35 and key not in seen:
+        if len(value) >= 45 and key not in seen:
             cleaned.append(value)
             seen.add(key)
 
-    # Prefer publisher-page paragraphs; append RSS detail only when it adds information.
+    # Real paragraphs only; never invent or pad details when the publisher supplies little text.
     return "\\n\\n".join(cleaned)[:3200]
 
 def stable_id(entry, final_url: str) -> str:
