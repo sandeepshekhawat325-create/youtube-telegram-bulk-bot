@@ -404,23 +404,33 @@ async def start_command(update, context):
     )
 
 async def status_command(update, context):
-    last_check = HEALTH["last_check"] or "अभी तक कोई जाँच दर्ज नहीं"
-    last_delivery = HEALTH["last_delivery"] or "अभी तक कोई News deliver नहीं हुई"
-    state = "🟢 Bot process चालू है"
+    last_check = HEALTH["last_check"] or "अभी तक दर्ज नहीं"
+    last_delivery = HEALTH["last_delivery"] or "अभी तक कोई खबर नहीं भेजी गई"
     destination = ", ".join(CHAT_IDS) if CHAT_IDS else "सेट नहीं है"
-    await update.effective_message.reply_text(
-        f"{state}\\n"
-        f"📡 News feeds: {len(FEEDS)} configured\\n"
-        f"🔎 पिछली जाँच: {last_check}\\n"
-        f"📬 पिछली सफल News delivery: {last_delivery}\\n"
-        f"📊 इस रनटाइम में भेजी गई News: {HEALTH['items_sent']}\\n"
-        f"📡 इस चक्र में जाँची गई feeds: {HEALTH['feeds_checked']}/{len(FEEDS)}\\n"
-        f"📰 {HEALTH['last_scan_summary']}\\n"
-        f"♻️ Duplicate News: {HEALTH['duplicate_items']}\\n"
-        f"📤 Telegram Delivery: {HEALTH['delivery_success']} सफल / {HEALTH['delivery_failed']} असफल\\n"
-        f"📢 Destination: {destination}\\n"
-        f"⚠️ पिछली feed error: {HEALTH['last_error'] or 'कोई दर्ज नहीं'}"
+    feeds_total = len(FEEDS)
+    feeds_done = HEALTH["feeds_checked"]
+    scan_summary = HEALTH["last_scan_summary"]
+
+    status_text = (
+        "🤖 GOVERNMENT NEWS MONITOR\\n"
+        "━━━━━━━━━━━━━━━━━━━━\\n"
+        "🟢 सिस्टम स्थिति: चालू है\\n"
+        f"📡 RSS Feeds: {feeds_done}/{feeds_total} जाँची गई\\n"
+        f"🕒 पिछली जाँच: {last_check}\\n"
+        f"📬 पिछली सफल खबर: {last_delivery}\\n"
+        "━━━━━━━━━━━━━━━━━━━━\\n"
+        "📊 NEWS SCAN REPORT\\n"
+        f"📰 {scan_summary}\\n"
+        f"♻️ Duplicate खबरें: {HEALTH['duplicate_items']}\\n"
+        f"📤 Telegram Delivery: {HEALTH['delivery_success']} सफल | "
+        f"{HEALTH['delivery_failed']} असफल\\n"
+        f"📈 इस रनटाइम में भेजी गई खबरें: {HEALTH['items_sent']}\\n"
+        "━━━━━━━━━━━━━━━━━━━━\\n"
+        "📢 CHANNEL DETAILS\\n"
+        f"🎯 Destination: {destination}\\n"
+        f"⚠️ Feed Error: {HEALTH['last_error'] or 'कोई नहीं'}"
     )
+    await update.effective_message.reply_text(status_text)
 
 async def lastcheck_command(update, context):
     await update.effective_message.reply_text(
