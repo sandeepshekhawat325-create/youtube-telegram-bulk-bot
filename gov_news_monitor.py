@@ -32,16 +32,20 @@ DB_PATH = os.getenv("NEWS_DB_PATH", "gov_news.sqlite3")
 # These Google News RSS queries are discovery feeds; a story is sent only after
 # its resolved URL passes the official-domain allowlist below.
 DEFAULT_FEEDS = [
-    "https://news.google.com/rss/search?q=site%3Agov.in+OR+site%3Anic.in+India+government+notification+OR+press+release&hl=en-IN&gl=IN&ceid=IN:en",
-    "https://news.google.com/rss/search?q=site%3Apib.gov.in+PIB+press+release&hl=en-IN&gl=IN&ceid=IN:en",
-    "https://news.google.com/rss/search?q=site%3Arajasthan.gov.in+OR+site%3Arajasthan.nic.in+Rajasthan+government+notification+OR+order&hl=hi&gl=IN&ceid=IN:hi",
-    "https://news.google.com/rss/search?q=site%3Adipr.rajasthan.gov.in+Rajasthan+government+news&hl=hi&gl=IN&ceid=IN:hi",
+    "https://news.google.com/rss/search?q=site%3Agov.in+OR+site%3Anic.in+central+government+notification+OR+circular+OR+order&hl=en-IN&gl=IN&ceid=IN:en",
+    "https://news.google.com/rss/search?q=site%3Apib.gov.in+press+release+India&hl=en-IN&gl=IN&ceid=IN:en",
+    "https://news.google.com/rss/search?q=site%3Arajasthan.gov.in+OR+site%3Arajasthan.nic.in+Rajasthan+government+notification+OR+order+OR+circular&hl=hi&gl=IN&ceid=IN:hi",
+    "https://news.google.com/rss/search?q=site%3Adipr.rajasthan.gov.in+Rajasthan+press+release&hl=hi&gl=IN&ceid=IN:hi",
+    "https://news.google.com/rss/search?q=site%3Arpsc.rajasthan.gov.in+RPSC+recruitment+result+exam+notification&hl=en-IN&gl=IN&ceid=IN:en",
+    "https://news.google.com/rss/search?q=site%3Arssb.rajasthan.gov.in+RSSB+recruitment+result+exam+notification&hl=en-IN&gl=IN&ceid=IN:en",
+    "https://news.google.com/rss/search?q=site%3Arajasthan.gov.in+Rajasthan+recruitment+exam+result+scheme&hl=hi&gl=IN&ceid=IN:hi",
 ]
 FEEDS = [x.strip() for x in os.getenv("FEED_URLS", "").split(",") if x.strip()] or DEFAULT_FEEDS
 
 # Runtime health details shown by /status and /lastcheck.
 HEALTH = {"last_check": None, "last_delivery": None, "last_error": None,
-          "feeds_checked": 0, "items_sent": 0}
+          "feeds_checked": 0, "items_sent": 0, "entries_seen": 0,
+          "official_candidates": 0, "last_scan_summary": "अभी कोई जाँच नहीं हुई"}
 
 OFFICIAL_SUFFIXES = (
     ".gov.in", ".nic.in", ".rajasthan.gov.in", ".rajasthan.nic.in",
@@ -79,12 +83,16 @@ def resolve_entry_url(entry) -> str:
     url = entry.get("link", "")
     if not url:
         return ""
-    try:
-        response = requests.get(url, timeout=15, allow_redirects=True,
-                                headers={"User-Agent": "GovNewsMonitor/1.0"})
-        return response.url
-    except Exception:
-        return url
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"}
+    for attempt in range(3):
+        try:
+            response = requests.get(url, timeout=(10, 25), allow_redirects=True,
+                                    headers=headers)
+            return response.url
+        except Exception as exc:
+            log.warning("Google News link resolution attempt %d failed: %s", attempt + 1, exc)
+            if attempt == 2:
+                return url
 
 def publication_time(entry) -> str:
     raw = entry.get("published") or entry.get("updated")
@@ -111,6 +119,8 @@ def parse_feed(url: str):
 async def scan_once(bot: Bot):
     HEALTH["last_check"] = datetime.now().astimezone().strftime("%d-%m-%Y %I:%M:%S %p %Z")
     HEALTH["feeds_checked"] = 0
+    HEALTH["entries_seen"] = 0
+    HEALTH["official_candidates"] = 0
     total_entries = 0
     sent_this_cycle = 0
     log.info("Starting news scan: %d feeds; destinations=%d", len(FEEDS), len(CHAT_IDS))
@@ -122,6 +132,7 @@ async def scan_once(bot: Bot):
             HEALTH["feeds_checked"] += 1
             entries = parsed.entries[:50]
             total_entries += len(entries)
+            HEALTH["entries_seen"] += len(entries)
             log.info("Feed fetched: %s | entries=%d | bozo=%s",
                      urlparse(feed_url).hostname, len(entries), getattr(parsed, "bozo", False))
             for entry in entries:
@@ -130,6 +141,7 @@ async def scan_once(bot: Bot):
                 if not official_url(final_url):
                     log.debug("Skipping non-official/unresolved item: %s", final_url[:300])
                     continue
+                HEALTH["official_candidates"] += 1
                 item_id = stable_id(entry, final_url)
                 if not item_id or was_sent(item_id):
                     continue
@@ -170,8 +182,11 @@ async def scan_once(bot: Bot):
         except Exception:
             HEALTH["last_error"] = feed_url
             log.exception("Feed scan failed: %s", feed_url)
-    log.info("News scan complete: entries=%d sent=%d feeds_ok=%d/%d",
-             total_entries, sent_this_cycle, HEALTH["feeds_checked"], len(FEEDS))
+    HEALTH["last_scan_summary"] = (
+        f"कुल आइटम {total_entries}, आधिकारिक लिंक {HEALTH['official_candidates']}, "
+        f"भेजी गई खबरें {sent_this_cycle}, सफल feeds {HEALTH['feeds_checked']}/{len(FEEDS)}"
+    )
+    log.info("News scan complete: %s", HEALTH["last_scan_summary"])
 
 async def monitor_loop(bot: Bot):
     # Never let a transient feed/API/database error permanently stop monitoring.
@@ -208,7 +223,8 @@ async def status_command(update, context):
         f"🔎 पिछली जाँच: {last_check}\\n"
         f"📬 पिछली सफल News delivery: {last_delivery}\\n"
         f"📊 इस रनटाइम में भेजी गई News: {HEALTH['items_sent']}\\n"
-        f"📡 इस चक्र में जाँची गई feeds: {HEALTH['feeds_checked']}\\n"
+        f"📡 इस चक्र में जाँची गई feeds: {HEALTH['feeds_checked']}/{len(FEEDS)}\\n"
+        f"📰 {HEALTH['last_scan_summary']}\\n"
         f"📢 Destination: {destination}\\n"
         f"⚠️ पिछली feed error: {HEALTH['last_error'] or 'कोई दर्ज नहीं'}"
     )
@@ -219,11 +235,32 @@ async def lastcheck_command(update, context):
         f"📬 पिछली सफल delivery: {HEALTH['last_delivery'] or 'अभी तक नहीं हुई'}"
     )
 
+async def test_command(update, context):
+    if not CHAT_IDS:
+        await update.effective_message.reply_text("❌ TELEGRAM_CHAT_IDS सेट नहीं है।")
+        return
+    sent = 0
+    for chat_id in CHAT_IDS:
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="✅ Government News Bot Test Message\\n"
+                     "Telegram channel delivery सही है। यह केवल परीक्षण संदेश है।"
+            )
+            sent += 1
+        except Exception:
+            log.exception("Test message failed for destination %s", chat_id)
+    await update.effective_message.reply_text(
+        f"टेस्ट संदेश {sent}/{len(CHAT_IDS)} चैनल पर भेजा गया। "
+        "यदि संख्या 0 है तो Bot Admin permission और TELEGRAM_CHAT_IDS जाँचें।"
+    )
+
 async def help_command(update, context):
     await update.effective_message.reply_text(
         "/start – बॉट का परिचय\\n"
         "/status – बॉट और News Monitoring की स्थिति\\n"
         "/lastcheck – पिछली जाँच और सफल delivery का समय\\n"
+        "/test – चैनल पर परीक्षण संदेश भेजें\\n"
         "/help – कमांड सूची"
     )
 
@@ -287,6 +324,7 @@ def main():
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("lastcheck", lastcheck_command))
+    app.add_handler(CommandHandler("test", test_command))
     app.add_handler(CommandHandler("help", help_command))
     # Python 3.14 no longer implicitly creates a current event loop in
     # the main thread. python-telegram-bot's run_polling() expects one.
