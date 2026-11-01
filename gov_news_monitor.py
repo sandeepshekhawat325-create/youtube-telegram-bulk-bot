@@ -142,6 +142,32 @@ def publication_time(entry) -> str:
     dt = entry_datetime(entry)
     return dt.astimezone(INDIA_TZ).strftime("%d-%m-%Y %I:%M:%S %p IST") if dt else "प्रकाशन समय उपलब्ध नहीं"
 
+
+def is_informative_news(title: str, summary: str = "") -> bool:
+    """Reject city landing pages, daily roundup pages and headline-only directory posts."""
+    title_clean = re.sub(r"\s+", " ", (title or "")).strip()
+    low = title_clean.casefold()
+    generic_patterns = (
+        r"\bnews\s+in\s+hindi\b", r"\bnews\s+today\b", r"\btoday\s+for\s+\d{1,2}\b",
+        r"\bchuru\s+news\b", r"\bjaipur\s+news\b", r"\brajasthan\s+news\b",
+        r"\blatest\s+news\b", r"\btop\s+news\b", r"\bnews\s+live\b",
+        r"न्यूज़\s*today", r"आज\s*की\s*खबरें", r"आज\s*की\s*न्यूज़",
+        r"शहर\s*की\s*खबरें", r"ताजा\s*खबरें"
+    )
+    if any(re.search(pattern, low, re.I) for pattern in generic_patterns):
+        return False
+    # Headline should contain an actual event/action, not only a location/category label.
+    if len(re.findall(r"[A-Za-z\u0900-\u097F]{2,}", title_clean)) < 5:
+        return False
+    if summary:
+        s = re.sub(r"\s+", " ", summary).strip().casefold()
+        boilerplate = ("read all hindi breaking news", "copyright", "all rights reserved",
+                       "this website follows", "churu news in hindi", "news today for")
+        if any(term in s for term in boilerplate):
+            return False
+    return True
+
+
 def repair_mojibake(value: str) -> str:
     """Repair common UTF-8 text mistakenly decoded as Latin-1/Windows-1252."""
     if not value:
@@ -492,6 +518,9 @@ async def scan_once(bot: Bot):
                     log.info("Skipping duplicate item: %s", title[:180])
                     continue
                 summary = detailed_summary(entry, final_url)
+                if not is_informative_news(title, summary):
+                    log.info("Skipping generic/low-information news item: %s", title[:180])
+                    continue
                 news_image = await asyncio.to_thread(extract_news_image, entry, final_url)
                 source_host = urlparse(final_url).hostname or "अज्ञात स्रोत"
                 source_label = "आधिकारिक सरकारी सूचना" if official_url(final_url) else "मीडिया रिपोर्ट"
