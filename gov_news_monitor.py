@@ -146,13 +146,12 @@ def repair_mojibake(value: str) -> str:
     """Repair common UTF-8 text mistakenly decoded as Latin-1/Windows-1252."""
     if not value:
         return value
-    if any(marker in value for marker in ("à¤", "à¦", "Ã", "â€™", "â€œ", "â€")):
+    markers = ("à¤", "à¦", "Ã", "â€™", "â€œ", "â€")
+    if any(marker in value for marker in markers):
         for encoding in ("latin-1", "cp1252"):
             try:
                 fixed = value.encode(encoding).decode("utf-8")
-                if fixed.count("�") <= value.count("�") and not any(
-                    marker in fixed for marker in ("à¤", "à¦", "Ã", "â€™", "â€œ", "â€")
-                ):
+                if not any(marker in fixed for marker in markers):
                     return fixed
             except (UnicodeEncodeError, UnicodeDecodeError):
                 continue
@@ -160,7 +159,7 @@ def repair_mojibake(value: str) -> str:
 
 
 def detailed_summary(entry, article_url: str = "") -> str:
-    """Prefer the actual RSS story description and relevant article metadata, not site-wide boilerplate."""
+    """Extract story-specific RSS/meta text; reject boilerplate and unrelated descriptions."""
     from html.parser import HTMLParser
     import requests
 
@@ -187,7 +186,6 @@ def detailed_summary(entry, article_url: str = "") -> str:
 
     title = repair_mojibake((entry.get("title") or "").strip())
     candidates = []
-    # RSS description is usually the most story-specific text; keep its order.
     for key in ("content", "summary_detail", "summary", "description"):
         value = entry.get(key)
         if isinstance(value, list):
@@ -197,17 +195,23 @@ def detailed_summary(entry, article_url: str = "") -> str:
         elif isinstance(value, str):
             candidates.append(value)
 
-    # Add only page-level description metadata, not every paragraph on the publisher site.
     if article_url and trusted_news_url(article_url):
         try:
             response = requests.get(
                 article_url, timeout=(8, 15), allow_redirects=True,
-                headers={"User-Agent": "Mozilla/5.0 (compatible; GovNewsMonitor/1.3)"}
+                headers={"User-Agent": "Mozilla/5.0 (compatible; GovNewsMonitor/1.4)"}
             )
             if response.ok and trusted_news_url(response.url):
-                response.encoding = response.apparent_encoding or response.encoding
+                # Decode UTF-8 explicitly when declared or when no charset is declared;
+                # do not let requests guess ISO-8859-1 for Hindi pages.
+                content_type = response.headers.get("Content-Type", "").lower()
+                if "charset=" not in content_type or "utf-8" in content_type or "utf8" in content_type:
+                    page_text = response.content.decode("utf-8", errors="replace")
+                else:
+                    response.encoding = response.apparent_encoding or response.encoding
+                    page_text = response.text
                 meta = MetaParser()
-                meta.feed(response.text[:1500000])
+                meta.feed(page_text[:1500000])
                 candidates.extend(meta.descriptions)
         except Exception:
             log.info("Could not fetch article description metadata: %s", article_url)
@@ -216,15 +220,15 @@ def detailed_summary(entry, article_url: str = "") -> str:
     seen = set()
     boilerplate = (
         "read all hindi breaking news", "this website follows", "statutory provisions",
-        "copyright ©", "all rights reserved", "subscribe", "advertisement",
+        "copyright", "all rights reserved", "subscribe", "advertisement",
         "cookie policy", "privacy policy", "terms and conditions"
     )
+    title_words = {w.casefold() for w in re.findall(r"[A-Za-zÀ-ÿ\u0900-\u097F]{3,}", title)}
     for chunk in candidates:
         parser = TextParser()
         parser.feed(str(chunk))
-        value = " ".join(" ".join(parser.parts).split())
-        value = repair_mojibake(value)
-        value = re.sub(r"\\s+", " ", value).strip()
+        value = repair_mojibake(" ".join(" ".join(parser.parts).split()))
+        value = re.sub(r"\s+", " ", value).strip()
         if not value or len(value) < 45:
             continue
         low = value.casefold()
@@ -234,13 +238,17 @@ def detailed_summary(entry, article_url: str = "") -> str:
             continue
         if title and low.startswith(title.casefold()):
             value = value[len(title):].lstrip(" :-–—|")
-        key = value.casefold()
+            low = value.casefold()
+        # Reject generic site descriptions with little topical overlap with the headline.
+        words = {w.casefold() for w in re.findall(r"[A-Za-zÀ-ÿ\u0900-\u097F]{3,}", value)}
+        if title_words and len(title_words & words) / max(1, len(title_words)) < 0.12:
+            continue
+        key = low
         if len(value) >= 45 and key not in seen:
             cleaned.append(value)
             seen.add(key)
 
-    # Real paragraphs only; never invent or pad details when the publisher supplies little text.
-    return "\\n\\n".join(cleaned)[:3200]
+    return "\n\n".join(cleaned)[:3200]
 
 def stable_id(entry, final_url: str) -> str:
     return str(entry.get("id") or entry.get("guid") or final_url)
