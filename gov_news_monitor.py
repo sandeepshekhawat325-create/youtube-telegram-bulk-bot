@@ -142,31 +142,105 @@ def publication_time(entry) -> str:
     dt = entry_datetime(entry)
     return dt.astimezone(INDIA_TZ).strftime("%d-%m-%Y %I:%M:%S %p IST") if dt else "प्रकाशन समय उपलब्ध नहीं"
 
-def detailed_summary(entry) -> str:
-    chunks = []
+def detailed_summary(entry, article_url: str = "") -> str:
+    """Build a fuller news detail from RSS description and the publisher page's public meta/paragraph text."""
+    from html.parser import HTMLParser
+    import requests
+
+    class ArticleParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.meta = []
+            self.paragraphs = []
+            self.in_paragraph = False
+            self.in_ignored = 0
+            self.current = []
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            tag = tag.lower()
+            if tag == "meta":
+                key = (attrs.get("property") or attrs.get("name") or "").lower()
+                if key in {"og:description", "description", "twitter:description"}:
+                    content = attrs.get("content", "").strip()
+                    if content:
+                        self.meta.append(content)
+            elif tag in {"script", "style", "noscript"}:
+                self.in_ignored += 1
+            elif tag == "p" and not self.in_ignored:
+                self.in_paragraph = True
+                self.current = []
+
+        def handle_endtag(self, tag):
+            tag = tag.lower()
+            if tag in {"script", "style", "noscript"} and self.in_ignored:
+                self.in_ignored -= 1
+            elif tag == "p" and self.in_paragraph:
+                value = " ".join(" ".join(self.current).split())
+                if len(value) > 45:
+                    self.paragraphs.append(value)
+                self.in_paragraph = False
+                self.current = []
+
+        def handle_data(self, data):
+            if self.in_ignored:
+                return
+            if self.in_paragraph:
+                self.current.append(data)
+
+    title = (entry.get("title") or "").strip()
+    rss_chunks = []
     for key in ("content", "summary_detail", "summary", "description"):
         value = entry.get(key)
         if isinstance(value, list):
-            chunks.extend(part.get("value", "") for part in value if isinstance(part, dict))
+            rss_chunks.extend(part.get("value", "") for part in value if isinstance(part, dict))
         elif isinstance(value, dict):
-            chunks.append(value.get("value", ""))
+            rss_chunks.append(value.get("value", ""))
         elif isinstance(value, str):
-            chunks.append(value)
-    from html.parser import HTMLParser
-    class StripHTML(HTMLParser):
-        def __init__(self):
-            super().__init__()
-            self.parts = []
-        def handle_data(self, data):
-            self.parts.append(data)
+            rss_chunks.append(value)
+
+    parser = ArticleParser()
+    if article_url and trusted_news_url(article_url):
+        try:
+            response = requests.get(
+                article_url, timeout=(8, 15), allow_redirects=True,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; GovNewsMonitor/1.2)"}
+            )
+            if response.ok and trusted_news_url(response.url):
+                parser.feed(response.text[:1500000])
+        except Exception:
+            log.info("Could not fetch full publisher details: %s", article_url)
+
+    candidates = parser.meta + parser.paragraphs + rss_chunks
     cleaned = []
-    for chunk in chunks:
-        parser = StripHTML()
-        parser.feed(chunk)
-        value = " ".join(" ".join(parser.parts).split())
-        if value and value not in cleaned:
+    seen = set()
+    for chunk in candidates:
+        strip = ArticleParser()
+        strip.feed(str(chunk))
+        value = " ".join(" ".join(strip.paragraphs).split())
+        if not value:
+            # RSS descriptions often contain short HTML fragments rather than paragraphs.
+            class TextOnly(HTMLParser):
+                def __init__(self):
+                    super().__init__()
+                    self.parts = []
+                def handle_data(self, data):
+                    self.parts.append(data)
+            text_parser = TextOnly()
+            text_parser.feed(str(chunk))
+            value = " ".join(" ".join(text_parser.parts).split())
+        value = re.sub(r"\\s+", " ", value).strip()
+        if not value or value.lower() == title.lower():
+            continue
+        if title and value.lower().startswith(title.lower()):
+            value = value[len(title):].lstrip(" :-–—|")
+        key = value.casefold()
+        if len(value) > 35 and key not in seen:
             cleaned.append(value)
-    return " ".join(cleaned)[:2400]
+            seen.add(key)
+
+    # Prefer publisher-page paragraphs; append RSS detail only when it adds information.
+    return "\\n\\n".join(cleaned)[:3200]
 
 def stable_id(entry, final_url: str) -> str:
     return str(entry.get("id") or entry.get("guid") or final_url)
@@ -334,7 +408,7 @@ async def scan_once(bot: Bot):
                     HEALTH["duplicate_items"] += 1
                     log.info("Skipping duplicate item: %s", title[:180])
                     continue
-                summary = detailed_summary(entry)
+                summary = detailed_summary(entry, final_url)
                 source_host = urlparse(final_url).hostname or "अज्ञात स्रोत"
                 source_label = "आधिकारिक सरकारी सूचना" if official_url(final_url) else "मीडिया रिपोर्ट"
                 text = (
