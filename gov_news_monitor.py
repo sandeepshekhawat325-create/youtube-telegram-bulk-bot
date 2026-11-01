@@ -422,29 +422,30 @@ async def status_command(update, context):
     destination = ", ".join(CHAT_IDS) if CHAT_IDS else "सेट नहीं है"
     feeds_total = len(FEEDS)
     feeds_done = HEALTH["feeds_checked"]
-    scan_summary = HEALTH["last_scan_summary"]
 
-    status_text = (
-        "🤖 GOVERNMENT NEWS MONITOR\\n"
-        "━━━━━━━━━━━━━━━━━━━━\\n"
-        "🟢 सिस्टम स्थिति: चालू है\\n"
-        f"📡 RSS Feeds: {feeds_done}/{feeds_total} जाँची गई\\n"
-        f"🕒 पिछली जाँच: {last_check}\\n"
-        f"📬 पिछली सफल खबर: {last_delivery}\\n"
-        "━━━━━━━━━━━━━━━━━━━━\\n"
-        "📊 NEWS SCAN REPORT\\n"
-        f"📰 {scan_summary}\\n"
-        f"♻️ Duplicate खबरें: {HEALTH['duplicate_items']}\\n"
-        f"📤 Telegram Delivery: {HEALTH['delivery_success']} सफल | "
-        f"{HEALTH['delivery_failed']} असफल\\n"
-        f"🛠 Delivery Error: {HEALTH['delivery_error']}\\n"
-        f"📈 इस रनटाइम में भेजी गई खबरें: {HEALTH['items_sent']}\\n"
-        "━━━━━━━━━━━━━━━━━━━━\\n"
-        "📢 CHANNEL DETAILS\\n"
-        f"🎯 Destination: {destination}\\n"
-        f"⚠️ Feed Error: {HEALTH['last_error'] or 'कोई नहीं'}"
-    )
-    await update.effective_message.reply_text(status_text)
+    lines = [
+        "🤖 <b>GOVERNMENT NEWS MONITOR</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"🟢 <b>सिस्टम:</b> चालू है",
+        f"📡 <b>RSS Feeds:</b> {feeds_done}/{feeds_total}",
+        f"🕒 <b>पिछली जाँच:</b> {html.escape(last_check)}",
+        f"📬 <b>पिछली सफल खबर:</b> {html.escape(last_delivery)}",
+        "",
+        "📊 <b>NEWS SCAN REPORT</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"📥 <b>कुल RSS आइटम:</b> {HEALTH['entries_seen']}",
+        f"🏛 <b>आधिकारिक लिंक:</b> {HEALTH['official_candidates']}",
+        f"♻️ <b>Duplicate खबरें:</b> {HEALTH['duplicate_items']}",
+        f"📤 <b>Delivery:</b> {HEALTH['delivery_success']} सफल | {HEALTH['delivery_failed']} असफल",
+        f"📈 <b>इस रनटाइम में भेजी खबरें:</b> {HEALTH['items_sent']}",
+        f"🛠 <b>Delivery Error:</b> {html.escape(str(HEALTH.get('delivery_error', 'अभी कोई त्रुटि नहीं'))[:350])}",
+        "",
+        "📢 <b>CHANNEL DETAILS</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"🎯 <b>Destination:</b> <code>{html.escape(destination)}</code>",
+        f"⚠️ <b>Feed Error:</b> {html.escape(str(HEALTH['last_error'] or 'कोई नहीं'))}",
+    ]
+    await update.effective_message.reply_text("\\n".join(lines), parse_mode="HTML")
 
 async def lastcheck_command(update, context):
     await update.effective_message.reply_text(
