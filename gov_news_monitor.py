@@ -305,8 +305,8 @@ async def scan_once(bot: Bot):
                 if not trusted_news_url(final_url):
                     source_meta = entry.get("source") or {}
                     source_url = (source_meta.get("href") or "").strip()
-                    if official_url(source_url):
-                        log.info("Using verified official publisher URL from RSS metadata: %s",
+                    if trusted_news_url(source_url):
+                        log.info("Using verified publisher URL from RSS metadata: %s",
                                  urlparse(source_url).hostname)
                         final_url = source_url
 
