@@ -39,6 +39,10 @@ DEFAULT_FEEDS = [
 ]
 FEEDS = [x.strip() for x in os.getenv("FEED_URLS", "").split(",") if x.strip()] or DEFAULT_FEEDS
 
+# Runtime health details shown by /status and /lastcheck.
+HEALTH = {"last_check": None, "last_delivery": None, "last_error": None,
+          "feeds_checked": 0, "items_sent": 0}
+
 OFFICIAL_SUFFIXES = (
     ".gov.in", ".nic.in", ".rajasthan.gov.in", ".rajasthan.nic.in",
     ".pib.gov.in", ".india.gov.in",
@@ -99,9 +103,12 @@ def parse_feed(url: str):
     return feedparser.parse(url)
 
 async def scan_once(bot: Bot):
+    HEALTH["last_check"] = datetime.now().astimezone().strftime("%d-%m-%Y %I:%M:%S %p %Z")
+    HEALTH["feeds_checked"] = 0
     for feed_url in FEEDS:
         try:
             parsed = await asyncio.to_thread(parse_feed, feed_url)
+            HEALTH["feeds_checked"] += 1
             for entry in parsed.entries[:50]:
                 title = (entry.get("title") or "शीर्षक उपलब्ध नहीं").strip()
                 final_url = await asyncio.to_thread(resolve_entry_url, entry)
@@ -137,17 +144,59 @@ async def scan_once(bot: Bot):
                         await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML",
                                                disable_web_page_preview=True)
                         delivered = True
+                        HEALTH["last_delivery"] = datetime.now().astimezone().strftime("%d-%m-%Y %I:%M:%S %p %Z")
+                        HEALTH["items_sent"] += 1
                     except Exception:
                         log.exception("Telegram delivery failed for destination %s", chat_id)
                 if delivered:
                     mark_sent(item_id)
         except Exception:
+            HEALTH["last_error"] = feed_url
             log.exception("Feed scan failed: %s", feed_url)
 
 async def monitor_loop(bot: Bot):
     while True:
         await scan_once(bot)
         await asyncio.sleep(POLL_SECONDS)
+
+async def start_command(update, context):
+    await update.effective_message.reply_text(
+        "नमस्कार! यह India + Rajasthan Government News Monitor Bot है।\\n\\n"
+        "यह सरकारी वेबसाइटों से नई सूचनाएँ खोजकर निर्धारित Telegram चैनल पर भेजता है।\\n"
+        "अपनी स्थिति देखने के लिए /status भेजें।\\n"
+        "अंतिम जाँच के लिए /lastcheck भेजें।\\n"
+        "कमांड सूची के लिए /help भेजें।"
+    )
+
+async def status_command(update, context):
+    last_check = HEALTH["last_check"] or "अभी तक कोई जाँच दर्ज नहीं"
+    last_delivery = HEALTH["last_delivery"] or "अभी तक कोई News deliver नहीं हुई"
+    state = "🟢 Bot process चालू है"
+    destination = ", ".join(CHAT_IDS) if CHAT_IDS else "सेट नहीं है"
+    await update.effective_message.reply_text(
+        f"{state}\\n"
+        f"📡 News feeds: {len(FEEDS)} configured\\n"
+        f"🔎 पिछली जाँच: {last_check}\\n"
+        f"📬 पिछली सफल News delivery: {last_delivery}\\n"
+        f"📊 इस रनटाइम में भेजी गई News: {HEALTH['items_sent']}\\n"
+        f"📡 इस चक्र में जाँची गई feeds: {HEALTH['feeds_checked']}\\n"
+        f"📢 Destination: {destination}\\n"
+        f"⚠️ पिछली feed error: {HEALTH['last_error'] or 'कोई दर्ज नहीं'}"
+    )
+
+async def lastcheck_command(update, context):
+    await update.effective_message.reply_text(
+        f"🔎 पिछली News जाँच: {HEALTH['last_check'] or 'अभी तक नहीं हुई'}\\n"
+        f"📬 पिछली सफल delivery: {HEALTH['last_delivery'] or 'अभी तक नहीं हुई'}"
+    )
+
+async def help_command(update, context):
+    await update.effective_message.reply_text(
+        "/start – बॉट का परिचय\\n"
+        "/status – बॉट और News Monitoring की स्थिति\\n"
+        "/lastcheck – पिछली जाँच और सफल delivery का समय\\n"
+        "/help – कमांड सूची"
+    )
 
 async def post_init(application):
     init_db()
@@ -165,6 +214,14 @@ async def post_shutdown(application):
             pass
 
 class HealthHandler(BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        if self.path in ("/", "/health", "/healthz"):
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        else:
+            self.send_error(404)
+
     def do_GET(self):
         if self.path in ("/", "/health", "/healthz"):
             body = b"Government News Monitor is running"
@@ -195,8 +252,13 @@ def main():
     start_health_server()
 
     from telegram.ext import Application
+    from telegram.ext import CommandHandler
     app = (Application.builder().token(BOT_TOKEN)
            .post_init(post_init).post_shutdown(post_shutdown).build())
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("lastcheck", lastcheck_command))
+    app.add_handler(CommandHandler("help", help_command))
     # Python 3.14 no longer implicitly creates a current event loop in
     # the main thread. python-telegram-bot's run_polling() expects one.
     try:
@@ -204,8 +266,8 @@ def main():
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
 
-    # This is a monitoring-only bot; no user commands are required.
-    app.run_polling(drop_pending_updates=True)
+    # Poll Telegram updates for both channel monitoring and user commands.
+    app.run_polling(drop_pending_updates=False)
 
 if __name__ == "__main__":
     main()
