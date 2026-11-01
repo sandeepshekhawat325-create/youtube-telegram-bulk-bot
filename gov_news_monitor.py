@@ -323,10 +323,23 @@ async def scan_once(bot: Bot):
                     send_error = None
                     for attempt in range(1, 3):
                         try:
-                            await bot.send_message(
-                                chat_id=chat_id, text=text, parse_mode="HTML",
-                                disable_web_page_preview=True
-                            )
+                            try:
+                                await bot.send_message(
+                                    chat_id=chat_id, text=text, parse_mode="HTML",
+                                    disable_web_page_preview=True
+                                )
+                            except Exception as html_exc:
+                                # If Telegram rejects malformed HTML from any source field,
+                                # retry the same news as safe plain text instead of losing it.
+                                from telegram.error import BadRequest
+                                if not isinstance(html_exc, BadRequest):
+                                    raise
+                                plain_text = html.unescape(re.sub(r"</?(?:b|i|u|code|pre|a)(?:\\s+[^>]*)?>", "", text))
+                                plain_text = re.sub(r"<[^>]+>", "", plain_text)
+                                await bot.send_message(
+                                    chat_id=chat_id, text=plain_text[:4000],
+                                    disable_web_page_preview=True
+                                )
                             delivered = True
                             HEALTH["delivery_success"] += 1
                             HEALTH["delivery_error"] = "अभी कोई त्रुटि नहीं"
