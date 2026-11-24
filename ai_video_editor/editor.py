@@ -24,7 +24,7 @@ def render_video(input_path: Path, output_path: Path) -> None:
     has_audio = any(s.get("codec_type") == "audio" for s in metadata.get("streams", []))
 
     vf = [
-        "scale='min(1920,iw)':'min(1920,ih)':force_original_aspect_ratio=decrease",
+        "scale='min(1920,iw)':'min(1920,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
         "setsar=1",
     ]
     fade = min(0.35, duration / 8) if duration > 0 else 0
