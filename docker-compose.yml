@@ -1,0 +1,15 @@
+services:
+  ai-video-editor:
+    build: .
+    container_name: ai-auto-video-editor
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      WORK_DIR: /app/work
+      MAX_DOWNLOAD_MB: ${MAX_DOWNLOAD_MB:-19}
+      MAX_OUTPUT_MB: ${MAX_OUTPUT_MB:-49}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./work:/app/work
+    init: true
